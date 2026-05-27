@@ -1,9 +1,7 @@
+# -*- coding: utf-8 -*-
 import argparse
-import re
 from pathlib import Path
 import fitz
-
-
 
 
 def find_first_existing_font(candidates):
@@ -47,45 +45,89 @@ def update_pdf(input_pdf, output_pdf, font_bold):
         black = (0, 0, 0)
 
         for page in doc:
-            # 1) T�m t?t c? "SL:" v� ch? x? l� khi s? lu?ng >= 2
+            all_words = page.get_text("words")
+
+            # ── 1) Xử lý "SL: N" ──────────────────────────────────────────
             instances = page.search_for("SL:")
 
             for rect in instances:
-                # M? r?ng rect sang ph?i d? d?c s? ph�a sau "SL:"
-                extended_rect = fitz.Rect(rect.x0, rect.y0, rect.x1 + 30, rect.y1)
-                snippet = page.get_text("text", clip=extended_rect).strip()
+                # Tìm index của word "SL:"
+                sl_idx = None
+                for i, w in enumerate(all_words):
+                    if w[4].strip() in ("SL:", "SL") \
+                            and abs(w[0] - rect.x0) < 5 \
+                            and abs(w[1] - rect.y0) < 5:
+                        sl_idx = i
+                        break
 
-                match = re.search(r"SL:\s*(\d+)", snippet)
-                if not match:
+                if sl_idx is None or sl_idx + 1 >= len(all_words):
                     continue
 
-                quantity = int(match.group(1))
+                next_w = all_words[sl_idx + 1]
+                if not next_w[4].strip().isdigit():
+                    continue
+
+                quantity = int(next_w[4].strip())
                 if quantity < 2:
-                    continue  # SL: 1 ? b? qua, gi? nguy�n
+                    continue  # SL:1 -> giữ nguyên
 
                 full_text = f"SL: {quantity}"
-                full_rect = fitz.Rect(rect.x0, rect.y0, rect.x1 + 30, rect.y1)
+                bold_font_sl = fitz.Font(fontfile=font_bold)
 
-                page.draw_rect(full_rect, color=white, fill=white)  # x�a ch? cu
+                # Vùng bao phủ cả "SL:" lẫn số gốc (dù cùng dòng hay khác dòng)
+                x0 = rect.x0
+                y0 = min(rect.y0, next_w[1])
+                x1 = next_w[2]          # ✅ cạnh phải của số gốc – không vượt sang QR
+                y1 = max(rect.y1, next_w[3])
+
+                erase_rect = fitz.Rect(x0, y0, x1, y1)
+                page.draw_rect(erase_rect, color=white, fill=white)
+
+                # Tính fontsize vừa khớp chiều cao dòng "SL:" gốc
+                line_h = rect.height          # chiều cao 1 dòng
+                fontsize = line_h * 0.85      # 0.85 để không vượt ô
+
+                # ✅ Nếu text rộng hơn vùng cho phép thì thu nhỏ thêm
+                text_w = bold_font_sl.text_length(full_text, fontsize=fontsize)
+                avail_w = x1 - x0
+                if text_w > avail_w:
+                    fontsize *= avail_w / text_w
+                    text_w = avail_w
+
+                # Baseline = y1 của dòng "SL:" (cùng dòng với chữ gốc)
+                baseline_y = rect.y1 - 1
+
                 tw = fitz.TextWriter(page.rect)
                 tw.append(
-                    (full_rect.x0, full_rect.y1),
+                    (x0, baseline_y),
                     full_text,
-                    font=fitz.Font(fontfile=font_bold),
-                    fontsize=11,
+                    font=bold_font_sl,
+                    fontsize=fontsize,
                 )
                 tw.write_text(page, color=black)
 
-            # 3) T�m "Combo" ? in d?m + g?ch ch�n (kh�ng d� ch? kh�c)
+            # ── 2) Xử lý "Combo": in đậm + gạch chân ─────────────────────
             combo_instances = page.search_for("Combo")
+
             for rect in combo_instances:
                 combo_rect = fitz.Rect(rect)
-                # X�a ch? cu d�ng v�ng g?c
-                page.draw_rect(combo_rect, color=white, fill=white)
-
-                # Vi?t l?i "Combo" bold, fontsize v?a kh�t � g?c
                 bold_font = fitz.Font(fontfile=font_bold)
-                fit_size = combo_rect.height * 0.85
+                target_size = combo_rect.height * 1.05
+                text_w = bold_font.text_length("Combo", fontsize=target_size)
+
+                max_w = combo_rect.width * 1.3
+                if text_w > max_w:
+                    target_size *= max_w / text_w
+                    text_w = max_w
+
+                fit_size = target_size
+
+                erase_rect = fitz.Rect(
+                    combo_rect.x0, combo_rect.y0,
+                    combo_rect.x0 + text_w + 1, combo_rect.y1
+                )
+                page.draw_rect(erase_rect, color=white, fill=white)
+
                 tw2 = fitz.TextWriter(page.rect)
                 tw2.append(
                     (combo_rect.x0, combo_rect.y1 - 1),
@@ -95,10 +137,9 @@ def update_pdf(input_pdf, output_pdf, font_bold):
                 )
                 tw2.write_text(page, color=black)
 
-                # G?ch ch�n d? n?i b?t khi in den tr?ng
                 page.draw_line(
                     fitz.Point(combo_rect.x0, combo_rect.y1 + 1),
-                    fitz.Point(combo_rect.x1, combo_rect.y1 + 1),
+                    fitz.Point(combo_rect.x0 + text_w, combo_rect.y1 + 1),
                     color=black, width=1.0,
                 )
 
